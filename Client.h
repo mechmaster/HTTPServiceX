@@ -1,8 +1,10 @@
 #pragma once
 
-#include <string>
+#include <vector>
 #include <deque>
 #include <map>
+
+#include <stdint.h>
 
 #include <boost/noncopyable.hpp>
 #include <boost/thread.hpp>
@@ -16,13 +18,11 @@ class Client : private boost::noncopyable
   boost::asio::io_service m_service;
   boost::asio::ip::tcp::socket m_socket;
 
-  std::deque<std::string> m_commands;
+  std::deque<std::vector<std::uint8_t>> m_commands;
   boost::recursive_mutex m_cmdGuard;
   
-  std::map<std::string, std::string> m_headerList;
-  std::string m_body;
-  
-  bool m_processCollectBody;
+  std::deque<std::vector<std::uint8_t>> m_responces;
+  boost::recursive_mutex m_rspGuard;
 
   void cycle(const std::string& serverIP, const std::string& serverPort);
 
@@ -36,5 +36,8 @@ public:
   
   void runIO();
   
-  void sendMessage(const std::string& message, bool front = false);
+  void sendMessage(const std::vector<std::uint8_t>& message, bool front = false);
+  std::vector<std::uint8_t> getResponce();
+  
+  bool hasResponce();
 };
