@@ -6,6 +6,7 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/format.hpp>
+#include <boost/asio/basic_stream_socket.hpp>
 
 #include "Client.h"
 
@@ -73,10 +74,8 @@ void Client::cycle(const std::string& serverIP, const std::string& serverPort)
         continue;
       }
 
-      boost::asio::socket_base::non_blocking_io command(true);
-      m_socket.io_control(command, error);
-
       connected = true;
+      m_socket.non_blocking(true);
     }
 
     if (!waitRead && m_commands.size())
