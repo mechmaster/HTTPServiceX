@@ -12,13 +12,19 @@
 
 Client::Client::Client() :
   m_isStopped(false),
-  m_socket(m_service)
+  m_socket(m_service),
+  m_connected(false)
 {
 }
 
 Client::~Client()
 {
   stop();
+}
+
+bool Client::isConnected()
+{
+    return m_connected;
 }
 
 void Client::sendMessage(const std::vector<std::uint8_t>& message, bool front)
@@ -51,7 +57,6 @@ void Client::cycle(const std::string& serverIP, const std::string& serverPort)
     break;
   }
 
-  bool connected = false;
   bool waitRead = false;
   bool waitWrite = true;
 
@@ -59,22 +64,22 @@ void Client::cycle(const std::string& serverIP, const std::string& serverPort)
 
   while (!m_isStopped)
   {
-    if (!connected)
+    if (!m_connected)
     {
       m_socket.connect(endpoint, error);
       if (error)
       {
-        std::cout << "Connect fail!" << std::endl;
+        std::cout << "Fatal error: can not connect to server." << std::endl;
         if (!connectFail)
         {
           connectFail = true;
         }
 
-        boost::this_thread::sleep(boost::posix_time::milliseconds(5000));
+        boost::this_thread::sleep(boost::posix_time::milliseconds(500));
         continue;
       }
 
-      connected = true;
+      m_connected = true;
       m_socket.non_blocking(true);
     }
 
@@ -87,7 +92,7 @@ void Client::cycle(const std::string& serverIP, const std::string& serverPort)
 
       if (error)
       {
-        connected = false;
+        m_connected = false;
         waitRead = false;
         waitWrite = true;
 
@@ -125,7 +130,7 @@ void Client::cycle(const std::string& serverIP, const std::string& serverPort)
 
       if (error)
       {
-        connected = false;
+        m_connected = false;
         waitRead = false;
         waitWrite = true;
 
@@ -197,6 +202,8 @@ void Client::stop()
     return;
   }
 
+  boost::this_thread::sleep(boost::posix_time::milliseconds(10));
+
   try
   {
     m_isStopped = true;
@@ -206,7 +213,10 @@ void Client::stop()
     m_socket.cancel(error);
     m_socket.close(error);
 
-    m_thread.join();
+    if (m_thread.joinable())
+    {
+        m_thread.join();
+    }
 
     m_isStopped = false;
   }

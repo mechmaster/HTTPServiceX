@@ -24,6 +24,8 @@ class Client : private boost::noncopyable
   std::deque<std::vector<std::uint8_t>> m_responces;
   boost::recursive_mutex m_rspGuard;
 
+  bool m_connected;
+
   void cycle(const std::string& serverIP, const std::string& serverPort);
 
 public:
@@ -40,4 +42,6 @@ public:
   std::vector<std::uint8_t> getResponce();
   
   bool hasResponce();
+
+  bool isConnected();
 };

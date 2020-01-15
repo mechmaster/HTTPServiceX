@@ -18,17 +18,22 @@ void query(Client& cl, const std::vector<std::uint8_t>& request)
     boost::this_thread::sleep(boost::posix_time::milliseconds(100));
     timeout += 100;
     
+    if (!cl.isConnected())
+    {
+      return;
+    }
+
     if (timeout >= 60000)
     {
         break;
     }
-    
+
     if (cl.hasResponce())
     {
         break;
     }
   }
-  
+
   std::vector<std::uint8_t> responce = cl.getResponce();
   
   /*if (responce.size() && responce[1] == 0x01)
@@ -365,7 +370,6 @@ int main(int argc, char **argv)
     std::cout << "lz4" << std::endl;
     std::cout << "snappy" << std::endl;
 
-  //192.168.0.11 9342
   std::string serverIP = "127.0.0.1";
   std::string port = "9042";
   std::string compressionType = "none";
