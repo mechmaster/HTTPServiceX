@@ -1,13 +1,17 @@
 set(servicex_src_files
   main.cpp
   Client.cpp
+  CassandraUtils.cpp
 )
 
 set(servicex_header_files
   Client.h
+  CRC.h
+  CassandraUtils.h
+  CassandraTypes.h
 )
 
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.10)
 project(httpservicex)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
