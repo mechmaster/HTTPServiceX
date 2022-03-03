@@ -10,8 +10,137 @@
 #include <lz4.h>
 #include <snappy.h>
 
+void writeHeader(std::vector<std::uint8_t>& buffer, const cassandra::types::PacketHeader& header,
+    const std::uint8_t offset)
+{
+    if (buffer.size() < 9)
+    {
+        throw std::length_error("Buffer empty or its length is less than nine bytes!");
+    }
+    if ((offset != 0) && (buffer.size() < (cassandra::types::HEADER_LENGTH + offset)))
+    {
+        throw std::length_error("Buffer empty or its length is less than nine bytes!");
+    }
+    
+    buffer[0 + offset] = header.version_;
+    buffer[1 + offset] = header.flags_;
+    buffer[2 + offset] = static_cast<std::uint8_t>((header.id_ >> 8));
+    buffer[3 + offset] = static_cast<std::uint8_t>(header.id_);
+    buffer[4 + offset] = header.opcode_;
+    buffer[5 + offset] = static_cast<std::uint8_t>((header.bodyLength_ >> 24));
+    buffer[6 + offset] = static_cast<std::uint8_t>((header.bodyLength_ >> 16));
+    buffer[7 + offset] = static_cast<std::uint8_t>((header.bodyLength_ >> 8));
+    buffer[8 + offset] = static_cast<std::uint8_t>(header.bodyLength_);
+}
+
+void wrapCompressedPacket(std::vector<std::uint8_t>& buffer, const std::uint32_t compressedSize,
+    const std::uint32_t uncompressedSize, const std::uint8_t offset)
+{
+    if (offset != 8)
+    {
+        return;
+    }
+    
+    std::uint32_t crc32 = cassandra::utils::calculateCRC32(reinterpret_cast<char*>(&buffer[offset]),
+        buffer.size() - (offset + 4));
+
+    buffer[buffer.size() - 1] = static_cast<std::uint8_t>((crc32 >> 24));
+    buffer[buffer.size() - 2] = static_cast<std::uint8_t>((crc32 >> 16));
+    buffer[buffer.size() - 3] = static_cast<std::uint8_t>((crc32 >> 8));
+    buffer[buffer.size() - 4] = static_cast<std::uint8_t>(crc32);
+    
+    std::uint64_t temp = 0;
+    // 32, 40, 48, 56
+    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>((uncompressedSize >> 8))) << 32);
+    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(uncompressedSize)) << 40);
+
+    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>((compressedSize >> 8))) << 48);
+    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(compressedSize)) << 56);
+    
+    if (compressedSize >= (64 * 1024 * 1024))
+    {
+        temp |= 0x0000800000000000;
+    }
+    
+    if (uncompressedSize >= (64 * 1024 * 1024))
+    {
+        temp |= 0x0000000040000000;
+    }
+    
+    temp |= 0x0000000004000000;
+    
+    buffer[0] = static_cast<std::uint8_t>(temp >> 56);
+    buffer[1] = static_cast<std::uint8_t>(temp >> 48);
+    buffer[2] = static_cast<std::uint8_t>(temp >> 40);
+    buffer[3] = static_cast<std::uint8_t>(temp >> 32);
+    buffer[4] = static_cast<std::uint8_t>(temp >> 24);
+    
+    std::uint32_t crc24 = cassandra::utils::calculateCRC24(reinterpret_cast<char*>(&buffer[0]), 5);
+    buffer[7] = static_cast<std::uint8_t>((crc24 >> 16));
+    buffer[6] = static_cast<std::uint8_t>((crc24 >> 8));
+    buffer[5] = static_cast<std::uint8_t>(crc24);
+}
+
+void wrapUncompressedPacket(std::vector<std::uint8_t>& buffer, /*const cassandra::types::PacketHeader& header,*/
+    const std::uint8_t offset)
+{
+    if (offset != 6)
+    {
+        return;
+    }
+    
+    std::uint32_t crc32 = cassandra::utils::calculateCRC32(reinterpret_cast<char*>(&buffer[offset]),
+        buffer.size() - (offset + 4));
+    
+    buffer[buffer.size() - 1] = static_cast<std::uint8_t>((crc32 >> 24));
+    buffer[buffer.size() - 2] = static_cast<std::uint8_t>((crc32 >> 16));
+    buffer[buffer.size() - 3] = static_cast<std::uint8_t>((crc32 >> 8));
+    buffer[buffer.size() - 4] = static_cast<std::uint8_t>(crc32);
+
+    std::uint32_t payloadLength = 0;//header.bodyLength_ + cassandra::types::HEADER_LENGTH;    
+    payloadLength |= (static_cast<std::uint8_t>(buffer[5 + offset]) << 24);
+    payloadLength |= (static_cast<std::uint8_t>(buffer[6 + offset]) << 16);
+    payloadLength |= (static_cast<std::uint8_t>(buffer[7 + offset]) << 8);
+    payloadLength |= (static_cast<std::uint8_t>(buffer[8 + offset]));
+    payloadLength += cassandra::types::HEADER_LENGTH;
+
+    bool payloadLengthHBit = false;
+    if (payloadLength >= (64 * 1024 * 1024))
+    {
+        payloadLengthHBit = true;
+    }
+    
+    buffer[1] = static_cast<std::uint8_t>((payloadLength >> 8));
+    buffer[0] = static_cast<std::uint8_t>(payloadLength);
+    
+    buffer[2] = 0x02;
+    
+    std::bitset<8> newSettingsSet(buffer[2]);
+    
+    if (payloadLengthHBit)
+    {
+        newSettingsSet.set(7);
+    }
+    
+    buffer[2] = static_cast<std::uint8_t>(newSettingsSet.to_ulong());
+    
+    std::uint32_t crc24 = cassandra::utils::calculateCRC24(reinterpret_cast<char*>(&buffer[0]), 3);
+    buffer[5] = static_cast<std::uint8_t>((crc24 >> 16));
+    buffer[4] = static_cast<std::uint8_t>((crc24 >> 8));
+    buffer[3] = static_cast<std::uint8_t>(crc24);
+}
+
 void query(Client& cl, const std::vector<std::uint8_t>& request, bool not_wait_responce = false)
 {
+    std::cout << std::endl;
+    std::cout << "{";
+    for (unsigned int i = 0; i < request.size(); ++i)
+    {
+        std::cout << "0x" << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned short int>(request[i]) << ", ";
+    }
+    std::cout << "}";
+    std::cout << std::endl;
+
   cl.sendMessage(request);
 
   if (not_wait_responce)
@@ -43,20 +172,6 @@ void query(Client& cl, const std::vector<std::uint8_t>& request, bool not_wait_r
 
   std::vector<std::uint8_t> responce = cl.getResponce();
   
-  /*if (responce.size() && responce[1] == 0x01)
-  {
-    std::string uncompress_packet;
-    auto snappy_res = snappy::Uncompress(reinterpret_cast<char*>(&responce[9]), responce.size() - 9, &uncompress_packet);
-    if (snappy_res)
-    {
-        std::cout << "Uncompress succesfull!";
-    }
-    else
-    {
-        std::cout << "responce size = " << responce.size() << ". Uncompress failed!";
-    }
-  }*/
-  
   std::cout << std::endl;
   std::cout << "{";
   for (unsigned int i = 0; i < responce.size(); ++i)
@@ -67,6 +182,38 @@ void query(Client& cl, const std::vector<std::uint8_t>& request, bool not_wait_r
   std::cout << std::endl;
 }
 
+void compressAndSend(Client& cl, std::vector<std::uint8_t>& buffer)
+{
+    const int uncompressedSize = buffer.size();
+
+    int compressDataSize = LZ4_compressBound(buffer.size());
+    std::vector<std::uint8_t> compressData;
+    compressData.resize(compressDataSize);
+
+    const int realcompressDataSize = LZ4_compress_fast(reinterpret_cast<char*>(&buffer[0]),
+        reinterpret_cast<char*>(&compressData[0]), buffer.size(), compressDataSize, 1);
+
+    compressData.resize(realcompressDataSize);
+    compressDataSize = realcompressDataSize;
+
+    compressData.insert(compressData.begin(), 8, 0x00);
+    compressData.insert(compressData.end(), 4, 0x00);
+
+    wrapCompressedPacket(compressData, compressDataSize, uncompressedSize * 2, 8);
+
+    query(cl, compressData);
+}
+
+void sendV5(Client& cl, std::vector<std::uint8_t>& buffer)
+{
+    buffer.insert(buffer.begin(), 6, 0x00);
+    buffer.insert(buffer.end(), 4, 0x00);
+
+    wrapUncompressedPacket(buffer, 6);
+
+    query(cl, buffer);
+}
+
 void test1(Client& cl)
 {
     std::vector<std::uint8_t> part1 = {0x42, 0x00, 0x00, 0x00, 0x05};
@@ -74,6 +221,55 @@ void test1(Client& cl)
 
     std::vector<std::uint8_t> part2 = {0x00, 0x00, 0x00, 0x00};
     query(cl, part2);
+}
+
+void non_compression_v5_test(Client& cl)
+{
+    std::vector<std::uint8_t> useProtocol5 = {0x05, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00};
+    query(cl, useProtocol5);
+
+    std::vector<std::uint8_t> startup = {0x05, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x16, 0x00, 0x01, 0x00, 0x0b,
+        0x43, 0x51, 0x4c, 0x5f, 0x56, 0x45, 0x52, 0x53, 0x49, 0x4f, 0x4e, 0x00, 0x05, 0x33, 0x2e, 0x34, 0x2e, 0x35};
+
+    query(cl, startup);
+
+    std::vector<std::uint8_t> loginandpass = {0x05, 0x00, 0x00, 0x01, 0x0f, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x14,
+    0x00, 0x63, 0x61, 0x73, 0x73, 0x61, 0x6e, 0x64, 0x72, 0x61, 0x00, 0x63, 0x61, 0x73, 0x73, 0x61, 0x6e, 0x64, 0x72, 0x61};
+    sendV5(cl, loginandpass);
+
+    std::vector<std::uint8_t> createkeyspace = {0x05, 0x00, 0x00, 0x02, 0x07, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00,
+        0x74, 0x43, 0x52, 0x45, 0x41, 0x54, 0x45, 0x20, 0x4b, 0x45, 0x59, 0x53, 0x50, 0x41, 0x43, 0x45, 0x20, 0x69,
+        0x66, 0x20, 0x6e, 0x6f, 0x74, 0x20, 0x65, 0x78, 0x69, 0x73, 0x74, 0x73, 0x20, 0x6d, 0x65, 0x63, 0x68, 0x6d,
+        0x61, 0x73, 0x74, 0x65, 0x72, 0x20, 0x57, 0x49, 0x54, 0x48, 0x20, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61,
+        0x74, 0x69, 0x6f, 0x6e, 0x20, 0x3d, 0x20, 0x7b, 0x20, 0x27, 0x63, 0x6c, 0x61, 0x73, 0x73, 0x27, 0x3a, 0x20,
+        0x27, 0x53, 0x69, 0x6d, 0x70, 0x6c, 0x65, 0x53, 0x74, 0x72, 0x61, 0x74, 0x65, 0x67, 0x79, 0x27, 0x2c, 0x27,
+        0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x66, 0x61, 0x63, 0x74, 0x6f, 0x72,
+        0x27, 0x3a, 0x20, 0x27, 0x33, 0x27, 0x20, 0x7d, 0x3b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
+    sendV5(cl, createkeyspace);
+
+    std::vector<std::uint8_t> createtable = {0x05, 0x00, 0x00, 0x03, 0x07, 0x00, 0x00, 0x00, 0x68, 0x00, 0x00, 0x00,
+        0x5e, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x20, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x20, 0x69, 0x66, 0x20, 0x6e,
+        0x6f, 0x74, 0x20, 0x65, 0x78, 0x69, 0x73, 0x74, 0x73, 0x20, 0x6d, 0x65, 0x63, 0x68, 0x6d, 0x61, 0x73, 0x74,
+        0x65, 0x72, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x5f, 0x6d, 0x61, 0x70, 0x31, 0x20, 0x28, 0x69, 0x64, 0x20, 0x69,
+        0x6e, 0x74, 0x20, 0x70, 0x72, 0x69, 0x6d, 0x61, 0x72, 0x79, 0x20, 0x6b, 0x65, 0x79, 0x2c, 0x20, 0x63, 0x31,
+        0x20, 0x6d, 0x61, 0x70, 0x3c, 0x76, 0x61, 0x72, 0x63, 0x68, 0x61, 0x72, 0x2c, 0x76, 0x61, 0x72, 0x63, 0x68,
+        0x61, 0x72, 0x3e, 0x29, 0x3b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
+    sendV5(cl, createtable);
+
+    std::vector<std::uint8_t> insertinto = {0x05, 0x00, 0x00, 0x04, 0x07, 0x00, 0x00, 0x00, 0x69, 0x00, 0x00, 0x00,
+        0x5f, 0x69, 0x6e, 0x73, 0x65, 0x72, 0x74, 0x20, 0x69, 0x6e, 0x74, 0x6f, 0x20, 0x6d, 0x65, 0x63, 0x68, 0x6d,
+        0x61, 0x73, 0x74, 0x65, 0x72, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x5f, 0x6d, 0x61, 0x70, 0x31, 0x20, 0x28, 0x69,
+        0x64, 0x2c, 0x20, 0x63, 0x31, 0x29, 0x20, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x20, 0x28, 0x31, 0x2c, 0x20,
+        0x7b, 0x27, 0x68, 0x73, 0x67, 0x6b, 0x61, 0x73, 0x27, 0x3a, 0x27, 0x6a, 0x68, 0x67, 0x6b, 0x66, 0x6a, 0x64,
+        0x73, 0x67, 0x68, 0x6b, 0x27, 0x2c, 0x20, 0x27, 0x6a, 0x68, 0x67, 0x6b, 0x6a, 0x27, 0x3a, 0x27, 0x67, 0x68,
+        0x73, 0x72, 0x27, 0x7d, 0x29, 0x3b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
+    sendV5(cl, insertinto);
+
+    std::vector<std::uint8_t> select = {0x05, 0x00, 0x00, 0x05, 0x07, 0x00, 0x00, 0x00, 0x2d, 0x00, 0x00, 0x00, 0x23,
+        0x73, 0x65, 0x6c, 0x65, 0x63, 0x74, 0x20, 0x2a, 0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x6d, 0x65, 0x63, 0x68,
+        0x6d, 0x61, 0x73, 0x74, 0x65, 0x72, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x5f, 0x6d, 0x61, 0x70, 0x31, 0x3b, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00};
+    sendV5(cl, select);
 }
 
 void non_compression_test(Client& cl)
@@ -131,9 +327,48 @@ void lz4_v5_compression_test(Client& cl) // native protocol version 5 + lz4 comp
     query(cl, useProtocol5);
     
     std::vector<std::uint8_t> startup = {0x05, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x28, 0x00, 0x02, 0x00, 0x0b,
-        0x43, 0x51, 0x4c, 0x5f, 0x56, 0x45, 0x52, 0x53, 0x49, 0x4f, 0x4e, 0x00, 0x05, 0x33, 0x2e, 0x30, 0x2e, 0x30, 0x00,
-        0x0b, 0x43, 0x4f, 0x4d, 0x50, 0x52, 0x45, 0x53, 0x53, 0x49, 0x4f, 0x4e, 0x00, 0x03, 0x6c, 0x7a, 0x34};
+        0x43, 0x51, 0x4c, 0x5f, 0x56, 0x45, 0x52, 0x53, 0x49, 0x4f, 0x4e, 0x00, 0x05, 0x33, 0x2e, 0x34, 0x2e, 0x35,
+        0x00, 0x0b, 0x43, 0x4f, 0x4d, 0x50, 0x52, 0x45, 0x53, 0x53, 0x49, 0x4f, 0x4e, 0x00, 0x03, 0x6c, 0x7a, 0x34};
     query(cl, startup);
+
+    std::vector<std::uint8_t> loginandpass = {0x05, 0x00, 0x00, 0x02, 0x0f, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+        0x14, 0x00, 0x63, 0x61, 0x73, 0x73, 0x61, 0x6e, 0x64, 0x72, 0x61, 0x00, 0x63, 0x61, 0x73, 0x73, 0x61, 0x6e,
+        0x64, 0x72, 0x61};
+    compressAndSend(cl, loginandpass);
+    
+    std::vector<std::uint8_t> createkeyspace = {0x05, 0x00, 0x00, 0x03, 0x07, 0x00, 0x00, 0x00, 0x85, 0x00, 0x00, 0x00, 0x87, 0xf7,
+        0x4e, 0x00, 0x00, 0x00, 0x74, 0x43, 0x52, 0x45, 0x41, 0x54, 0x45, 0x20, 0x4b, 0x45, 0x59, 0x53, 0x50, 0x41, 0x43, 0x45,
+        0x20, 0x69, 0x66, 0x20, 0x6e, 0x6f, 0x74, 0x20, 0x65, 0x78, 0x69, 0x73, 0x74, 0x73, 0x20, 0x6d, 0x65, 0x63, 0x68, 0x6d,
+        0x61, 0x73, 0x74, 0x65, 0x72, 0x20, 0x57, 0x49, 0x54, 0x48, 0x20, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69,
+        0x6f, 0x6e, 0x20, 0x3d, 0x20, 0x7b, 0x20, 0x27, 0x63, 0x6c, 0x61, 0x73, 0x73, 0x27, 0x3a, 0x20, 0x27, 0x53, 0x69, 0x6d,
+        0x70, 0x6c, 0x65, 0x53, 0x74, 0x72, 0x61, 0x74, 0x65, 0x67, 0x79, 0x27, 0x2c, 0x27, 0x2b, 0x00, 0x70, 0x5f, 0x66, 0x61,
+        0x63, 0x74, 0x6f, 0x72, 0x27, 0x00, 0xf0, 0x05, 0x33, 0x27, 0x20, 0x7d, 0x3b, 0x00, 0x0a, 0x24, 0x00, 0x00, 0x03, 0xe8,
+        0x00, 0x05, 0x9c, 0x17, 0x39, 0x3e, 0x8d, 0x59};
+    compressAndSend(cl, createkeyspace);
+
+    std::vector<std::uint8_t> createtable = {0x05, 0x00, 0x00, 0x04, 0x07, 0x00, 0x00, 0x00, 0x74, 0x00, 0x00, 0x00, 0x71, 0xf3,
+        0x49, 0x00, 0x00, 0x00, 0x5e, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x20, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x20, 0x69, 0x66,
+        0x20, 0x6e, 0x6f, 0x74, 0x20, 0x65, 0x78, 0x69, 0x73, 0x74, 0x73, 0x20, 0x6d, 0x65, 0x63, 0x68, 0x6d, 0x61, 0x73, 0x74,
+        0x65, 0x72, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x5f, 0x6d, 0x61, 0x70, 0x31, 0x20, 0x28, 0x69, 0x64, 0x20, 0x69, 0x6e, 0x74,
+        0x20, 0x70, 0x72, 0x69, 0x6d, 0x61, 0x72, 0x79, 0x20, 0x6b, 0x65, 0x79, 0x2c, 0x20, 0x63, 0x31, 0x20, 0x6d, 0x61, 0x70,
+        0x3c, 0x76, 0x61, 0x72, 0x63, 0x68, 0x61, 0x72, 0x2c, 0x08, 0x00, 0xf0, 0x03, 0x3e, 0x29, 0x3b, 0x00, 0x0a, 0x24, 0x00,
+        0x00, 0x03, 0xe8, 0x00, 0x05, 0x9c, 0x17, 0x39, 0x3f, 0x09, 0x5d};
+    compressAndSend(cl, createtable);
+
+    std::vector<std::uint8_t> insertinto = {0x05, 0x00, 0x00, 0x05, 0x07, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00, 0x72, 0xf0,
+        0x63, 0x00, 0x00, 0x00, 0x5f, 0x69, 0x6e, 0x73, 0x65, 0x72, 0x74, 0x20, 0x69, 0x6e, 0x74, 0x6f, 0x20, 0x6d, 0x65, 0x63,
+        0x68, 0x6d, 0x61, 0x73, 0x74, 0x65, 0x72, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x5f, 0x6d, 0x61, 0x70, 0x31, 0x20, 0x28, 0x69,
+        0x64, 0x2c, 0x20, 0x63, 0x31, 0x29, 0x20, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x20, 0x28, 0x31, 0x2c, 0x20, 0x7b, 0x27,
+        0x68, 0x73, 0x67, 0x6b, 0x61, 0x73, 0x27, 0x3a, 0x27, 0x6a, 0x68, 0x67, 0x6b, 0x66, 0x6a, 0x64, 0x73, 0x67, 0x68, 0x6b,
+        0x27, 0x2c, 0x20, 0x27, 0x6a, 0x68, 0x67, 0x6b, 0x6a, 0x27, 0x3a, 0x27, 0x67, 0x68, 0x73, 0x72, 0x27, 0x7d, 0x29, 0x3b,
+        0x00, 0x0a, 0x24, 0x00, 0x00, 0x03, 0xe8, 0x00, 0x05, 0x9c, 0x17, 0x39, 0x3f, 0x81, 0x14};
+    compressAndSend(cl, insertinto);
+
+    std::vector<std::uint8_t> select = {0x05, 0x00, 0x00, 0x06, 0x07, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x36, 0xf0, 0x27,
+        0x00, 0x00, 0x00, 0x23, 0x73, 0x65, 0x6c, 0x65, 0x63, 0x74, 0x20, 0x2a, 0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x6d, 0x65,
+        0x63, 0x68, 0x6d, 0x61, 0x73, 0x74, 0x65, 0x72, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x5f, 0x6d, 0x61, 0x70, 0x31, 0x3b, 0x00,
+        0x0a, 0x24, 0x00, 0x00, 0x03, 0xe8, 0x00, 0x05, 0x9c, 0x17, 0x39, 0x3f, 0xf9, 0x52};
+    compressAndSend(cl, select);
 }
 
 void lz4_compression_test(Client& cl)
@@ -400,8 +635,8 @@ void sendStartUseCompression(Client& cl, const std::string& algorithm = std::str
     request = {0x05, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x16, 0x00, 0x02};
     
     std::string cql_version = "CQL_VERSION";
-    std::string version = "3.0.0";
-    
+    std::string version = "3.4.5";
+
     request.push_back(cql_version.size() << 8);
     request.push_back(cql_version.size());
     
@@ -421,28 +656,31 @@ void sendStartUseCompression(Client& cl, const std::string& algorithm = std::str
     int body_size = 2;
     body_size += 2 + cql_version.size();
     body_size += 2 + version.size();
-    
-    std::string compression = "COMPRESSION";
-    
-    request.push_back(compression.size() << 8);
-    request.push_back(compression.size());
-    
-    for (unsigned int i = 0; i < compression.size(); ++i)
+
+    if (!algorithm.empty())
     {
-        request.push_back(compression[i]);
+        std::string compression = "COMPRESSION";
+        
+        request.push_back(compression.size() << 8);
+        request.push_back(compression.size());
+        
+        for (unsigned int i = 0; i < compression.size(); ++i)
+        {
+            request.push_back(compression[i]);
+        }
+        
+        request.push_back(algorithm.size() << 8);
+        request.push_back(algorithm.size());
+        
+        for (unsigned int i = 0; i < algorithm.size(); ++i)
+        {
+            request.push_back(algorithm[i]);
+        }
+    
+        body_size += 2 + compression.size();
+        body_size += 2 + algorithm.size();
     }
-    
-    request.push_back(algorithm.size() << 8);
-    request.push_back(algorithm.size());
-    
-    for (unsigned int i = 0; i < algorithm.size(); ++i)
-    {
-        request.push_back(algorithm[i]);
-    }
-    
-    body_size += 2 + compression.size();
-    body_size += 2 + algorithm.size();
-    
+
     request[8] = body_size;
     request[7] = body_size << 8;
     request[6] = body_size << 16;
@@ -473,122 +711,6 @@ std::vector<std::uint8_t> responce = cl.getResponce();
 viewPacketInHex(responce);*/
 }
 
-void writeHeader(std::vector<std::uint8_t>& buffer, const cassandra::types::PacketHeader& header,
-    const std::uint8_t offset)
-{
-    if (buffer.size() < 9)
-    {
-        throw std::length_error("Buffer empty or its length is less than nine bytes!");
-    }
-    if ((offset != 0) && (buffer.size() < (cassandra::types::HEADER_LENGTH + offset)))
-    {
-        throw std::length_error("Buffer empty or its length is less than nine bytes!");
-    }
-
-    buffer[0 + offset] = header.version_;
-    buffer[1 + offset] = header.flags_;
-    buffer[2 + offset] = static_cast<std::uint8_t>((header.id_ >> 8));
-    buffer[3 + offset] = static_cast<std::uint8_t>(header.id_);
-    buffer[4 + offset] = header.opcode_;
-    buffer[5 + offset] = static_cast<std::uint8_t>((header.bodyLength_ >> 24));
-    buffer[6 + offset] = static_cast<std::uint8_t>((header.bodyLength_ >> 16));
-    buffer[7 + offset] = static_cast<std::uint8_t>((header.bodyLength_ >> 8));
-    buffer[8 + offset] = static_cast<std::uint8_t>(header.bodyLength_);
-}
-
-void wrapCompressedPacket(std::vector<std::uint8_t>& buffer, const cassandra::types::PacketHeader& header,
-    const std::uint32_t compressedSize, const std::uint32_t uncompressedSize, const std::uint8_t offset)
-{
-    if (offset != 8)
-    {
-        return;
-    }
-
-    std::uint32_t crc32 = cassandra::utils::calculateCRC32(reinterpret_cast<char*>(&buffer[offset]),
-        buffer.size() - (offset + 4));
-
-    buffer[buffer.size() - 1] = static_cast<std::uint8_t>((crc32 >> 24));
-    buffer[buffer.size() - 2] = static_cast<std::uint8_t>((crc32 >> 16));
-    buffer[buffer.size() - 3] = static_cast<std::uint8_t>((crc32 >> 8));
-    buffer[buffer.size() - 4] = static_cast<std::uint8_t>(crc32);
-
-    std::uint64_t temp = 0;
-    // 32, 40, 48, 56
-    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>((uncompressedSize >> 8))) << 32);
-    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(uncompressedSize)) << 40);
-
-    temp = (temp >> 1);
-
-    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>((compressedSize >> 8))) << 48);
-    temp |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(compressedSize)) << 56);
-
-    if (compressedSize >= (64 * 1024 * 1024))
-    {
-        temp |= 0x0000800000000000;
-    }
-
-    if (uncompressedSize >= (64 * 1024 * 1024))
-    {
-        temp |= 0x0000000040000000;
-    }
-
-    temp |= 0x0000000002000000;
-
-    buffer[0] = static_cast<std::uint8_t>(temp >> 56);
-    buffer[1] = static_cast<std::uint8_t>(temp >> 48);
-    buffer[2] = static_cast<std::uint8_t>(temp >> 40);
-    buffer[3] = static_cast<std::uint8_t>(temp >> 32);
-    buffer[4] = static_cast<std::uint8_t>(temp >> 24);
-
-    std::uint32_t crc24 = cassandra::utils::calculateCRC24(reinterpret_cast<char*>(&buffer[0]), 5);
-    buffer[7] = static_cast<std::uint8_t>((crc24 >> 16));
-    buffer[6] = static_cast<std::uint8_t>((crc24 >> 8));
-    buffer[5] = static_cast<std::uint8_t>(crc24);
-}
-
-void wrapUncompressedPacket(std::vector<std::uint8_t>& buffer, const cassandra::types::PacketHeader& header,
-    const std::uint8_t offset)
-{
-    if (offset != 6)
-    {
-        return;
-    }
-
-    std::uint32_t crc32 = cassandra::utils::calculateCRC32(reinterpret_cast<char*>(&buffer[offset]),
-        buffer.size() - (offset + 4));
-
-    buffer[buffer.size() - 1] = static_cast<std::uint8_t>((crc32 >> 24));
-    buffer[buffer.size() - 2] = static_cast<std::uint8_t>((crc32 >> 16));
-    buffer[buffer.size() - 3] = static_cast<std::uint8_t>((crc32 >> 8));
-    buffer[buffer.size() - 4] = static_cast<std::uint8_t>(crc32);
-
-    std::uint32_t payloadLength = header.bodyLength_ + cassandra::types::HEADER_LENGTH;
-    bool payloadLengthHBit = false;
-    if (payloadLength >= (64 * 1024 * 1024))
-    {
-        payloadLengthHBit = true;
-    }
-
-    buffer[1] = static_cast<std::uint8_t>((payloadLength >> 8));
-    buffer[0] = static_cast<std::uint8_t>(payloadLength);
-
-    buffer[2] = 0x02;
-
-    std::bitset<8> newSettingsSet(buffer[2]);
-
-    if (payloadLengthHBit)
-    {
-        newSettingsSet.set(7);
-    }
-
-    buffer[2] = static_cast<std::uint8_t>(newSettingsSet.to_ulong());
-
-    std::uint32_t crc24 = cassandra::utils::calculateCRC24(reinterpret_cast<char*>(&buffer[0]), 3);
-    buffer[5] = static_cast<std::uint8_t>((crc24 >> 16));
-    buffer[4] = static_cast<std::uint8_t>((crc24 >> 8));
-    buffer[3] = static_cast<std::uint8_t>(crc24);
-}
-
 int main(int argc, char **argv)
 {
     std::cout << "Cassandra test compression. Version 1.0" << std::endl;
@@ -604,6 +726,7 @@ int main(int argc, char **argv)
     std::cout << "snappy" << std::endl;
     std::cout << "cst - compression stress test" << std::endl;
     std::cout << "lz4v5 - use native protocol v5 + lz4 compression" << std::endl;
+    std::cout << "nonev5" << std::endl;
 
   std::string serverIP = "127.0.0.1";
   std::string port = "9042";
@@ -653,6 +776,10 @@ int main(int argc, char **argv)
     {
         //sendStartUseCompression(cl, "lz4");
         lz4_v5_compression_test(cl);
+    }
+    else if (compressionType == "nonev5")
+    {
+        non_compression_v5_test(cl);
     }
   else
   {
